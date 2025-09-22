@@ -1,0 +1,40 @@
+{
+  "name": "backend-lib-dashboard",
+  "version": "1.0.0",
+  "description": "Backend service for Library Dashboard (Fastify + TypeScript + MySQL + Redis)",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "rimraf dist && tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "lint:types": "tsc --noEmit",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "prepare": "npm run build"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "fastify": "^4.28.1",
+    "@fastify/cors": "^8.5.0",
+  "@fastify/helmet": "^11.1.1",
+    "dotenv": "^16.6.1",
+    "ioredis": "^5.7.0",
+    "mysql2": "^3.15.0",
+    "node-cron": "^4.2.1",
+  "@fastify/swagger": "^8.14.0",
+  "@fastify/swagger-ui": "^1.9.3",
+    "sequelize": "^6.37.3"
+  },
+  "devDependencies": {
+    "@types/ioredis": "^4.28.10",
+    "@types/node": "^24.5.2",
+    "@types/node-cron": "^3.0.11",
+    "@types/validator": "^13.11.10",
+    "prettier": "^3.3.3",
+    "rimraf": "^5.0.10",
+    "tsx": "^4.19.1",
+    "typescript": "^5.9.2"
+  }
+}
