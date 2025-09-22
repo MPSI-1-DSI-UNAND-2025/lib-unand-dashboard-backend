@@ -82,13 +82,13 @@ Env: `TODAY_COUNT_MODE=direct|incremental|delta`
 - delta: Single baseline query (COUNT + MAX(visitor_id)) then only counts rows with `visitor_id > baseline_max_id` for the rest of the day; updates baseline as new rows appear.
 
 When to choose:
-| Mode | Kapan Dipakai | Akurasi | Beban DB |
-|------|---------------|---------|----------|
-| direct | Data kecil / QPS rendah | Sangat akurat | Tertinggi |
-| incremental | Bisa modifikasi jalur insert | Hampir akurat (drift < interval) | Rendah |
-| delta | Tidak bisa modifikasi insert, PK auto-increment | Hampir akurat | Rendah (1 full + mini deltas) |
+| Mode | When to Use | Accuracy | DB Load |
+|------|-------------|----------|---------|
+| direct | Small data set / low QPS | Exact | Highest |
+| incremental | You can modify the insert/write path | Near‑exact (minor drift) | Low |
+| delta | Can't modify writes; auto-increment PK available | Near‑exact | Low (1 full + small deltas) |
 
-Pakai `delta` bila Anda tidak bisa panggil `incrementTodayCount()` tapi ingin mengurangi full scan harian besar.
+Choose `delta` if you cannot call a write-time increment but want to avoid repeated full scans.
 
 ## SQL Index / Performance Notes
 - Ensure an index exists on `checkin_date` (BTREE).
@@ -106,7 +106,7 @@ Effective cadence ≈ lastRunDuration + buffer + minInterval. Monitor MySQL QPS 
 
 ### Sample Fast Loop Run (<10ms Total)
 
-Contoh real log (mode `delta`, Redis sudah warm, index pada `checkin_date` sudah ada):
+Real log sample (delta mode, warm Redis, index on `checkin_date` present):
 
 ```
 [cron-fast] ---- sync start ----
@@ -116,14 +116,14 @@ Contoh real log (mode `delta`, Redis sudah warm, index pada `checkin_date` sudah
 [cron-fast] ---- sync end ----
 ```
 
-Mengapa bisa secepat itu:
-1. Predicate terindeks `checkin_date >= CURDATE() AND checkin_date < CURDATE() + INTERVAL 1 DAY` membuat MySQL langsung ke rentang hari ini.
-2. Mode `delta` hanya menghitung baris baru (`visitor_id > baseline_max_id`) bukan full scan.
-3. Redis sudah memegang baseline & total berjalan sehingga hanya penambahan kecil.
-4. Loop dinamis tidak tabrakan job; selesai -> tunggu buffer -> jalan lagi.
-5. Payload ke Redis sangat kecil (beberapa key TTL pendek).
+Why it's this fast:
+1. Indexed predicate `checkin_date >= CURDATE() AND checkin_date < CURDATE() + INTERVAL 1 DAY` narrows directly to today's range.
+2. Delta mode counts only new rows (`visitor_id > baseline_max_id`) instead of rescanning.
+3. Redis holds the baseline + running total so only a small delta increment is applied.
+4. Dynamic loop eliminates overlapping jobs; finish -> small buffer -> schedule next.
+5. Very small Redis write footprint (a few short-TTL keys).
 
-First run setelah restart bisa lebih lambat (baseline warm-up). Setelah itu biasanya konvergen ke single digit millisecond kalau beban DB normal.
+First run after a restart may be slower (baseline warm-up). Subsequent iterations typically converge to single‑digit milliseconds under normal load.
 
 ### Switching DB Layer
 ```
@@ -187,5 +187,4 @@ Add a service function in `src/services/visitorService.ts`, register a cache key
   - Health endpoint exposing mode, last run duration, baseline info
   - Reusable OpenAPI component schemas
 
-## License
-MIT
+
