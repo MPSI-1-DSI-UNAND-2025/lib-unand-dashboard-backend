@@ -8,7 +8,7 @@
   <a href="#"><img src="https://img.shields.io/badge/Framework-Fastify-blue.svg"></a>
   <a href="#"><img src="https://img.shields.io/badge/Database-MySQL-orange.svg"></a>
   <a href="#"><img src="https://img.shields.io/badge/Cache-Redis-red.svg"></a>
-  <a href="#"><img src="https://img.shields.io/badge/License-MIT-purple.svg"></a>
+
 </p>
 
 ---
