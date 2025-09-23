@@ -29,7 +29,16 @@ export const CACHE_KEYS = {
   WEEK_DAILY: 'visitors:week:daily',
   MONTHLY_TOTALS: 'visitors:month:totals',
   YEARLY_TOTALS: 'visitors:year:totals',
+  TOP_MONTH_VISITORS: 'visitors:month:top',
+  TOP_YEAR_VISITORS: 'visitors:year:top',
   SUMMARY: 'visitors:summary'
+  ,BOOK_COLLECTION_STATS: 'books:stats:collection'
+  ,BOOK_TOP_BORROWED: 'books:top:borrowed'
+  ,BOOK_TOP_BORROWED_MONTH: 'books:top:borrowed:month'
+  ,BOOK_TOP_BORROWED_YEAR: 'books:top:borrowed:year'
+  ,BOOK_TOP_BORROWERS_MONTH: 'books:top:borrowers:month'
+  ,BOOK_TOP_BORROWERS_YEAR: 'books:top:borrowers:year'
+  ,BOOK_SUMMARY: 'books:summary'
 } as const;
 
 export async function setJSON(key: string, value: unknown, ttlSeconds?: number) {

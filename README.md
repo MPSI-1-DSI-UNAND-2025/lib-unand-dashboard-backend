@@ -1,190 +1,231 @@
-# Backend Library Dashboard
+<div align="center">
 
-Fastify + TypeScript backend for a Library Dashboard focusing on near-realtime visitor metrics sourced from a large MySQL table and cached in Redis. Supports hybrid DB access (native mysql2 or Sequelize ORM) and OpenAPI (Swagger) interactive docs.
+# Library Dashboard Backend
 
-## Features
-- REST APIs:
-  - `GET /api/visitors/today` – today's visitor count (near-realtime)
-  - `GET /api/visitors/weekly` – last 7 days (daily counts)
-  - `GET /api/visitors/monthly` – last 12 months (monthly totals)
-  - `GET /api/visitors/yearly` – last 5 years (annual totals)
-  - `GET /api/visitors/summary` – bundles today + weekly + monthly + yearly
-- Redis caching layer to reduce MySQL load
-- Dynamic scheduling:
-  - Fast loop (self-rescheduling) refreshes today's count sequentially (no overlap) respecting `VISITOR_SYNC_MIN_INTERVAL_MS` + execution time + buffer.
-  - Slow cron (daily 00:05 by default) warms weekly + monthly + yearly aggregates.
-- Fallback logic: if cache empty, query MySQL and repopulate
-- Strict TypeScript config
+Fast, cache-first analytics service for library visitor & borrowing statistics.
 
-## Tech Stack
-- Fastify
-- MySQL (`mysql2/promise`) OR Sequelize (`USE_SEQUELIZE=true`)
-- Redis (`ioredis`)
-- Dynamic loop + `node-cron` (slow aggregates)
-- TypeScript
-- OpenAPI docs (`@fastify/swagger` + `@fastify/swagger-ui`)
+</div>
 
-## Environment Variables
-See `.env.example` for all variables. Create a `.env` file:
-```bash
-cp .env.example .env
+## 1. Ringkas Konsep
+Hanya SATU metrik yang benar‑benar real‑time: jumlah pengunjung hari ini. Sisanya (mingguan, bulanan, tahunan, top visitors, top borrowed books, top borrowers) di-*freeze* sekali per hari lewat cron + prewarm saat startup, lalu disajikan full dari Redis (tanpa kueri DB per request). Ini menstabilkan beban MySQL dan membuat respon API konsisten dan cepat.
+
+## 2. Arsitektur Tingkat Tinggi
+```text
+┌────────────────────┐        ┌──────────────────────┐
+│  Frontend / Client │  HTTP  │ Fastify API Layer    │
+│  - Dashboard UI    ├────────►  (Routes + Validation│
+└────────────────────┘        │   + SSE for today)    │
+                              └─────────┬────────────┘
+                                        │
+                              (Redis first, DB fallback only for today)
+                                        │
+                           ┌────────────▼────────────┐
+                           │        Redis Cache       │
+                           │  - Prewarmed snapshots   │
+                           │  - Today count (short)   │
+                           └────────────┬────────────┘
+                                        │ (batch loads)
+                              ┌─────────▼───────────┐
+                              │      MySQL DB        │
+                              │  (loan, item, biblio │
+                              │   member, visitor)   │
+                              └─────────┬───────────┘
+                                        │
+                       ┌────────────────▼────────────────┐
+                       │   Schedulers / Jobs             │
+                       │  • Fast Loop (today visitors)   │
+                       │  • Daily Cron (all aggregates)  │
+                       │  • Startup Prewarm              │
+                       └─────────────────────────────────┘
 ```
 
-## Development
+## 3. Komponen Utama
+| Komponen | Fungsi | Frekuensi |
+|----------|--------|-----------|
+| Fast Loop (visitor today) | Mengupdate jumlah pengunjung hari ini & emit SSE | Detik-level (tergantung interval) |
+| Daily Cron | Regenerasi semua agregat non-real-time (visitor & books) | 1x per hari |
+| Prewarm Startup | Mengisi cache agar tidak ada 202 warming setelah boot | Saat aplikasi start |
+| Redis | Single source of truth untuk semua agregat non-real-time | — |
+| SSE Endpoint | Menyajikan stream update jumlah pengunjung hari ini | Live |
+| ORM (Sequelize) | Query relational untuk statistik buku/peminjam | Hanya saat prewarm/cron |
+
+## 4. Alur Data (Detail)
+1. Aplikasi start → koneksi MySQL + Redis → prewarm aggregator (pengunjung & buku) → tulis snapshot ke Redis (menyertakan metadata `generated_at`, `ttl_seconds`).
+2. Fast loop mulai berulang menghitung ulang `today` (low latency) kemudian:
+   - Set key Redis `visitors:today:count` (TTL pendek, misal 2x interval).
+   - Emit event SSE ke semua klien yang subscribe.
+3. Cron harian (misal jam 00:05) menjalankan ulang batch agregat (weekly, monthly, yearly, top, books, borrowers) → tulis ulang snapshot + perbarui metadata.
+4. Request API:
+   - Jika endpoint real-time: ambil dari Redis; fallback → kueri DB sekali & set TTL pendek.
+   - Jika endpoint agregat: HANYA baca cache. Bila belum siap → kembalikan 202 (warming) tanpa kueri DB langsung.
+5. Frontend menampilkan data stabil dan hanya perlu refresh manual (atau polling jarang) kecuali untuk today count yang bisa pakai SSE.
+
+## 5. Pola Respons & Kontrak Cache
+Semua agregat (non-today) disimpan dengan format:
+```json
+{
+  "generated_at": "2025-09-23T00:05:12.345Z",
+  "ttl_seconds": 90000,
+  "data": [ ... ]
+}
+```
+Jika cache belum tersedia: API merespons HTTP 202:
+```json
+{ "status": "warming", "message": "<description>", "retry_after_seconds": 5 }
+```
+
+## 6. Endpoint Kategori
+
+### 6.1 Real-Time & Streaming
+| Method | Path | Deskripsi | Sumber |
+|--------|------|-----------|--------|
+| GET | `/api/visitors/today` | Jumlah pengunjung hari ini (cache → fallback DB) | Redis / DB fallback |
+| GET | `/api/visitors/today/stream` | SSE stream update realtime today count | SSE (EventSource) |
+
+### 6.2 Visitor Aggregates (Cache-Only)
+| Method | Path | Data | Warm Behavior |
+|--------|------|------|---------------|
+| GET | `/api/visitors/weekly` | 7 hari terakhir (daily) | 202 jika belum siap |
+| GET | `/api/visitors/monthly` | 12 bulan terakhir | 202 jika belum siap |
+| GET | `/api/visitors/yearly` | 5 tahun terakhir | 202 jika belum siap |
+| GET | `/api/visitors/monthly/top` | Top 10 visitor bulan berjalan | 202 jika belum siap |
+| GET | `/api/visitors/yearly/top` | Top 10 visitor tahun berjalan | 202 jika belum siap |
+| GET | `/api/visitors/summary` | Bundle multi-metrik (cache summary) | 202 jika belum siap (kecuali today ditampilkan minimal) |
+
+### 6.3 Book & Borrowing Aggregates (Cache-Only)
+| Method | Path | Data |
+|--------|------|------|
+| GET | `/api/books/top-borrowed` | Top 10 buku paling banyak dipinjam (all time) |
+| GET | `/api/books/top-borrowed/month` | Top 10 buku bulan berjalan |
+| GET | `/api/books/top-borrowed/year` | Top 10 buku tahun berjalan |
+| GET | `/api/books/top-borrowers/month` | Top 10 peminjam bulan berjalan |
+| GET | `/api/books/top-borrowers/year` | Top 10 peminjam tahun berjalan |
+| GET | `/api/books/collection` | Statistik koleksi (judul unik & total item) |
+| GET | `/api/books/summary` | Ringkasan semua metrik buku |
+
+Semua di atas: 202 warming jika cache belum ada (tidak ada fallback query langsung).
+
+## 7. SSE (Server-Sent Events) Today Visitors
+Route: `GET /api/visitors/today/stream`
+
+Event types:
+| Event | Payload | Kapan |
+|-------|---------|-------|
+| `init` | `{ total, source, at }` | Saat koneksi pertama berhasil |
+| `update` | `{ total, generated_at }` | Setiap fast loop update |
+| (heartbeat) | `: keepalive` | Tiap ±15s agar koneksi tidak idle timeout |
+
+Contoh client sederhana (browser):
+```js
+const es = new EventSource('/api/visitors/today/stream');
+es.addEventListener('init', e => console.log('init', JSON.parse(e.data)));
+es.addEventListener('update', e => console.log('update', JSON.parse(e.data)));
+```
+
+## 8. Strategi Caching & TTL
+| Key / Tipe | Isi | TTL | Refresh Sumber |
+|------------|-----|-----|----------------|
+| `visitors:today:count` | Counter hari ini | ~2x interval fast loop | Fast loop |
+| Weekly / Monthly / Yearly / Top | Snapshot array + meta | 90000s (~25h) | Daily cron & startup prewarm |
+| Books & Borrowers snapshots | Top & koleksi | 90000s | Daily cron & startup prewarm |
+| Summary (opsional jika digunakan) | Bundle multi visitor metrics | (bisa diatur) | Cron / manual compose |
+
+TTL > 24h memberi grace period jika cron terlambat (downtime singkat/tunda eksekusi).
+
+## 9. Mode Penghitungan Today Visitors
+Env: `TODAY_COUNT_MODE=direct|incremental|delta` (implementation aware di service)
+
+| Mode | Karakteristik | Beban DB | Catatan |
+|------|---------------|----------|---------|
+| direct | COUNT range harian penuh | Paling tinggi | Sederhana, baseline default |
+| incremental | Basis + delta INCR | Rendah | Butuh kontrol di jalur tulis |
+| delta | COUNT awal + hitung penambahan berdasarkan PK > baseline | Sangat rendah | Ideal jika ada auto-increment & data besar |
+
+## 10. Startup Sequence
+1. Inisialisasi koneksi Sequelize / mysql2 (dengan retry)
+2. Prewarm visitor aggregates & book aggregates (Promise.allSettled)
+3. Mulai fast loop (today)
+4. Register cron harian (visitor & books)
+5. Server siap terima traffic (sebagian besar cache sudah panas)
+
+## 11. Environment Variabel Utama
+| Var | Deskripsi |
+|-----|-----------|
+| `PORT` | Port HTTP server |
+| `MYSQL_HOST / MYSQL_PORT / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE` | Kredensial MySQL |
+| `REDIS_URL` | Koneksi Redis (redis://...) |
+| `USE_SEQUELIZE` | Pakai Sequelize untuk query buku/loan (`true/false`) |
+| `TODAY_COUNT_MODE` | Mode hitung today (lihat tabel) |
+| `VISITOR_SYNC_MIN_INTERVAL_MS` | Interval minimal fast loop |
+| `VISITOR_SYNC_BUFFER_MS` | Buffer setelah selesai loop |
+| `VISITOR_SLOW_CRON` | Jadwal cron visitor agregat |
+| `BOOKS_SLOW_CRON` | Jadwal cron agregat buku |
+| `ENABLE_SSE_TODAY` (opsional future) | Flag mematikan SSE |
+
+Lihat `.env.example` untuk daftar lengkap.
+
+## 12. Query & Index Best Practice
+| Area | Rekomendasi |
+|------|-------------|
+| Today count | Index pada kolom tanggal (`checkin_date`) |
+| Delta mode | Tambah index komposit `(checkin_date, visitor_id)` untuk seleksi cepat & delta range |
+| Loan aggregations | Index di kolom sering difilter `loan_date`, serta foreign key `item_code`, `member_id`, `biblio_id` |
+| Top borrowed | Pastikan join path `loan.item_code -> item.item_code -> item.biblio_id -> biblio` indeks | 
+
+## 13. Pola 202 Warming
+Endpoint agregat TIDAK akan langsung kueri DB jika cache miss. Ini mencegah thundering herd saat cold start. Frontend dapat:
+1. Mendapat 202 → tampilkan spinner / status “Menyiapkan data…”.
+2. Retry setelah `retry_after_seconds`.
+
+## 14. Development
 ```bash
 npm install
-npm run dev
+npm run dev          # watch mode (tsx)
 ```
-Server runs on `http://localhost:3000`.
+Server default: `http://localhost:3000`
 
-## Build & Run
+Build produksi:
 ```bash
 npm run build
 npm start
 ```
 
-## Sequence Diagram (Simplified)
-```text
-+-----------+        +-----------+        +-------+        +-------+
-| Dashboard / Docs | -----> | Fastify   | -----> | Redis |        | MySQL |
-| (poll 5s) | <----- | API       | <----- | Cache | <----- |  DB   |
-+-----------+        +-----------+        +-------+        +-------+
-       |                   ^                   ^              ^
-       |                   | fast loop (interval+duration) warms today count
-       |                   | slow cron (daily) warms weekly/monthly/yearly
-       +-------------------------------------------------------+
-```
-Flow:
-1. Fast loop queries DB (today count, indexed range or delta mode) -> caches `visitors:today:count`
-2. Slow cron queries MySQL (weekly + monthly + yearly aggregates) -> caches:
-   - `visitors:week:daily`
-   - `visitors:month:totals`
-  - `visitors:year:totals`
-3. Summary endpoint optionally composes today+weekly+monthly+yearly and caches `visitors:summary` (15s)
-4. Dashboard/API calls respond from Redis (DB fallback if missing)
-5. Swagger UI available at `/docs` (JSON spec at `/docs/json`)
+## 15. OpenAPI / Docs
+Swagger UI: `/docs`
+Spec JSON: `/docs/json`
+Non-produksi disarankan; bisa diproteksi environment flag sebelum register plugin.
 
-## Cache Keys & TTL Strategy
-- Today count: loop sets TTL ~ (2–3x min interval) or manual fallback 60s if API missed warm
-- Weekly & Monthly: TTL 86400s (24h) since updated daily
-- Yearly: TTL 604800s (7 days) since it rarely changes mid-year
-- Summary: TTL 15s (short composite cache, avoids repeated multi-get + compute)
-- API fallback sets a short TTL (60s) for ad-hoc refresh safety
-
-### Today Count Modes
-Env: `TODAY_COUNT_MODE=direct|incremental|delta`
-
-- direct (default): Each refresh queries MySQL with indexed range predicate.
-- incremental: Maintains two Redis keys:
-  - `visitors:today:base` (snapshot from last reconciliation)
-  - `visitors:today:incremental` (delta via INCRBY operations)
-  - Reconciliation every 60s (configurable in code) resets delta after pulling true count.
-- delta: Single baseline query (COUNT + MAX(visitor_id)) then only counts rows with `visitor_id > baseline_max_id` for the rest of the day; updates baseline as new rows appear.
-
-When to choose:
-| Mode | When to Use | Accuracy | DB Load |
-|------|-------------|----------|---------|
-| direct | Small data set / low QPS | Exact | Highest |
-| incremental | You can modify the insert/write path | Near‑exact (minor drift) | Low |
-| delta | Can't modify writes; auto-increment PK available | Near‑exact | Low (1 full + small deltas) |
-
-Choose `delta` if you cannot call a write-time increment but want to avoid repeated full scans.
-
-## SQL Index / Performance Notes
-- Ensure an index exists on `checkin_date` (BTREE).
-- Today query uses range: `checkin_date >= CURDATE() AND checkin_date < CURDATE() + INTERVAL 1 DAY` (index friendly).
-- Consider composite index `(checkin_date, visitor_id)` if scanning large ranges frequently.
-- For sub-second read pressure consider adding an in-memory rolling counter (Redis INCR) and periodically reconciling with DB.
-
-### Faster Refresh?
-Adjust:
-```
-VISITOR_SYNC_MIN_INTERVAL_MS=1000  # target base interval (1s)
-VISITOR_SYNC_BUFFER_MS=300         # safety buffer after each run
-```
-Effective cadence ≈ lastRunDuration + buffer + minInterval. Monitor MySQL QPS & Redis ops.
-
-### Sample Fast Loop Run (<10ms Total)
-
-Real log sample (delta mode, warm Redis, index on `checkin_date` present):
-
-```
-[cron-fast] ---- sync start ----
-[cron-fast] getTodayCount -> 3 (6ms)
-[cron-fast] wrote cache keys (2ms) ttl=10s
-[cron-fast] total elapsed 9ms
-[cron-fast] ---- sync end ----
-```
-
-Why it's this fast:
-1. Indexed predicate `checkin_date >= CURDATE() AND checkin_date < CURDATE() + INTERVAL 1 DAY` narrows directly to today's range.
-2. Delta mode counts only new rows (`visitor_id > baseline_max_id`) instead of rescanning.
-3. Redis holds the baseline + running total so only a small delta increment is applied.
-4. Dynamic loop eliminates overlapping jobs; finish -> small buffer -> schedule next.
-5. Very small Redis write footprint (a few short-TTL keys).
-
-First run after a restart may be slower (baseline warm-up). Subsequent iterations typically converge to single‑digit milliseconds under normal load.
-
-### Switching DB Layer
-```
-USE_SEQUELIZE=false  # default: raw mysql2 pool (fastest)
-USE_SEQUELIZE=true   # use Sequelize model / ORM queries
-```
-All counting + aggregates honor the flag (no raw `sequelize.query` used).
-## OpenAPI (Swagger)
-After `npm install` and server start:
-- UI: `http://localhost:3000/docs`
-- JSON Spec: `http://localhost:3000/docs/json`
-
-Tag: `Visitors` documents all metrics endpoints.
-
-To disable docs in production, conditionally register swagger plugins (e.g., wrap registration with `if (process.env.ENABLE_SWAGGER !== 'false')`).
-
-## Environment Variables (Key Ones)
-| Variable | Purpose | Example |
-|----------|---------|---------|
-| PORT | Server port | 3000 |
-| DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME | MySQL connection | — |
-| REDIS_URL | Redis connection string | redis://localhost:6379 |
-| TODAY_COUNT_MODE | `direct|incremental|delta` | direct |
-| USE_SEQUELIZE | Toggle ORM | false |
-| VISITOR_SYNC_MIN_INTERVAL_MS | Fast loop base interval | 5000 |
-| VISITOR_SYNC_BUFFER_MS | Extra wait after a run | 500 |
-| VISITOR_SLOW_CRON | Cron for aggregates | 5 0 * * * |
-
-See `.env.example` for the full list.
-
-
-## Adding More Metrics
-Add a service function in `src/services/visitorService.ts`, register a cache key in `src/cache/redisClient.ts`, and decide whether it belongs to the fast (high-frequency) or slow (daily) schedule in `src/cron/syncVisitors.ts`. If it should be part of the combined response, also extend the logic in `routes/visitor.ts` summary handler.
-
-## Example Summary Response
+## 16. Contoh Respons Real-Time Today
 ```json
-{
-  "today": 154,
-  "weekly": [ { "date": "2025-09-16", "total": 123 }, ... ],
-  "monthly": [ { "month": "2025-03", "total": 3456 }, ... ],
-  "yearly": [ { "year": 2023, "total": 45678 }, ... ],
-  "source": "today:cache,weekly:cache,monthly:db,yearly:cache"
-}
+{ "total": 312, "source": "cache" }
+```
+SSE update event JSON:
+```json
+{ "total": 313, "generated_at": "2025-09-23T09:10:22.111Z" }
 ```
 
-  ## Development Notes
-  - Dev server uses `tsx watch` (auto restart). No need for `nodemon`.
-  - Production: build first (`npm run build`) then `npm start` (runs `dist/`).
-  - Avoid editing files in `dist/`; regenerate via build.
+## 17. Observability (Ide Lanjutan)
+| Item | Ide |
+|------|-----|
+| Metrics | Ekspor Prometheus: loop duration, cache hit rate |
+| Health | Endpoint: last cron run, age of snapshots |
+| Alerts | Jika `generated_at` > 30 jam → trigger warning |
+| Throttle | Adaptive interval jika durasi loop > ambang |
 
-  ## Performance Tips Recap
-  1. Ensure index on `checkin_date` (critical for <10ms today count).
-  2. Use `delta` mode if baseline count is heavy and you cannot increment on writes.
-  3. Set `USE_SEQUELIZE=false` for lowest latency; enable only if you need model abstraction.
-  4. Monitor loop logs to tune `VISITOR_SYNC_MIN_INTERVAL_MS`.
-  5. Keep summary TTL low to avoid stale today metrics.
+## 18. Roadmap (Opsional)
+- Health & metrics endpoint
+- Feature flag SSE (`ENABLE_SSE_TODAY`)
+- Prometheus exporter
+- Adaptive fast loop (meningkatkan interval bila QPS tinggi)
+- Bandwidth optimization (coalesce SSE updates jika burst)
 
-  ## Roadmap Ideas (Optional)
-  - Adaptive interval (increase interval if run duration spikes)
-  - Prometheus metrics exporter
-  - Health endpoint exposing mode, last run duration, baseline info
-  - Reusable OpenAPI component schemas
+## 19. Lisensi
+Internal / private (sesuaikan kebutuhan Anda).
+
+---
+Jika Anda menambah metrik baru: definisikan service → tambahkan key cache → masukkan ke cron/prewarm → buat route cache-only (202 warming) → (opsional) tambahkan ke summary. Pertahankan prinsip: DB hanya disentuh secara terjadwal atau untuk today count.
+
+Selamat membangun dashboard yang cepat & efisien 🚀
+
 
 

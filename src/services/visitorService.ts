@@ -228,7 +228,8 @@ export async function getMonthlyTotalsLastYear(): Promise<MonthlyTotal[]> {
       ],
       where: { checkin_date: { [Op.gte]: startMonth } },
       group: [fn('DATE_FORMAT', col('checkin_date'), '%Y-%m')],
-      order: [[fn('DATE_FORMAT', col('checkin_date'), '%Y-%m'), 'ASC']],
+      // Descending so latest month first
+      order: [[fn('DATE_FORMAT', col('checkin_date'), '%Y-%m'), 'DESC']],
       raw: true
     });
     return rows.map((r: any) => ({ month: r.month, total: Number(r.total) }));
@@ -237,7 +238,7 @@ export async function getMonthlyTotalsLastYear(): Promise<MonthlyTotal[]> {
                FROM visitor_count
                WHERE checkin_date >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 11 MONTH)
                GROUP BY month
-               ORDER BY month ASC`;
+               ORDER BY month DESC`;
   const [rows] = await pool.query(sql);
   return (rows as any[]).map(r => ({ month: r.month, total: Number(r.total) }));
 }
@@ -256,7 +257,8 @@ export async function getYearlyTotalsLast5Years(): Promise<YearlyTotal[]> {
       ],
       where: { checkin_date: { [Op.gte]: start } },
       group: [fn('YEAR', col('checkin_date'))],
-      order: [[fn('YEAR', col('checkin_date')), 'ASC']],
+      // Descending so latest year first
+      order: [[fn('YEAR', col('checkin_date')), 'DESC']],
       raw: true
     });
     return rows.map((r: any) => ({ year: Number(r.year), total: Number(r.total) }));
@@ -265,7 +267,119 @@ export async function getYearlyTotalsLast5Years(): Promise<YearlyTotal[]> {
                FROM visitor_count
                WHERE checkin_date >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 4 YEAR)
                GROUP BY YEAR(checkin_date)
-               ORDER BY year ASC`;
+               ORDER BY year DESC`;
   const [rows] = await pool.query(sql);
   return (rows as any[]).map(r => ({ year: Number(r.year), total: Number(r.total) }));
+}
+
+export interface MonthlyTopVisitor {
+  month: string; // YYYY-MM (current month only in this implementation)
+  member_id: string | null;
+  member_name: string | null;
+  total: number;
+}
+
+// Returns top N visitors (grouped by member) for the CURRENT month only.
+export async function getCurrentMonthTopVisitors(limit = 10): Promise<MonthlyTopVisitor[]> {
+  const now = new Date();
+  const mStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const mEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const monthKey = `${mStart.getFullYear()}-${String(mStart.getMonth() + 1).padStart(2, '0')}`;
+  const results: MonthlyTopVisitor[] = [];
+  if (USE_SEQUELIZE) {
+    const Visitor = await getVisitorModel();
+    const rows = await Visitor.findAll({
+      attributes: [
+        'member_id',
+        'member_name',
+        [fn('COUNT', col('*')), 'total']
+      ],
+      where: { checkin_date: { [Op.gte]: mStart, [Op.lt]: mEnd } },
+      group: ['member_id', 'member_name'],
+      order: [[fn('COUNT', col('*')), 'DESC']],
+      limit,
+      raw: true
+    });
+    for (const r of rows as any[]) {
+      results.push({
+        month: monthKey,
+        member_id: r.member_id,
+        member_name: r.member_name,
+        total: Number(r.total)
+      });
+    }
+  } else {
+    const sql = `SELECT member_id, member_name, COUNT(*) AS total
+                 FROM visitor_count
+                 WHERE checkin_date >= ? AND checkin_date < ?
+                 GROUP BY member_id, member_name
+                 ORDER BY total DESC
+                 LIMIT ${limit}`;
+    const [rows] = await pool.query(sql, [mStart, mEnd]);
+    for (const r of rows as any[]) {
+      results.push({
+        month: monthKey,
+        member_id: r.member_id,
+        member_name: r.member_name,
+        total: Number(r.total)
+      });
+    }
+  }
+  return results;
+}
+
+export interface YearlyTopVisitor {
+  year: number; // current year only in this implementation
+  member_id: string | null;
+  member_name: string | null;
+  total: number;
+}
+
+// Returns top N visitors (grouped by member) for the CURRENT year only.
+export async function getCurrentYearTopVisitors(limit = 10): Promise<YearlyTopVisitor[]> {
+  const now = new Date();
+  const y = now.getFullYear();
+  const yStart = new Date(y, 0, 1);
+  const yEnd = new Date(y + 1, 0, 1);
+  const results: YearlyTopVisitor[] = [];
+  if (USE_SEQUELIZE) {
+    const Visitor = await getVisitorModel();
+    const rows = await Visitor.findAll({
+      attributes: [
+        'member_id',
+        'member_name',
+        [fn('COUNT', col('*')), 'total']
+      ],
+      where: { checkin_date: { [Op.gte]: yStart, [Op.lt]: yEnd } },
+      group: ['member_id', 'member_name'],
+      order: [[fn('COUNT', col('*')), 'DESC']],
+      limit,
+      raw: true
+    });
+    for (const r of rows as any[]) {
+      results.push({
+        year: y,
+        member_id: r.member_id,
+        member_name: r.member_name,
+        total: Number(r.total)
+      });
+    }
+  } else {
+    const sql = `SELECT member_id, member_name, COUNT(*) AS total
+                 FROM visitor_count
+                 WHERE checkin_date >= ? AND checkin_date < ?
+                 GROUP BY member_id, member_name
+                 ORDER BY total DESC
+                 LIMIT ${limit}`;
+    const [rows] = await pool.query(sql, [yStart, yEnd]);
+    for (const r of rows as any[]) {
+      results.push({
+        year: y,
+        member_id: r.member_id,
+        member_name: r.member_name,
+        total: Number(r.total)
+      });
+    }
+  }
+  return results;
 }
