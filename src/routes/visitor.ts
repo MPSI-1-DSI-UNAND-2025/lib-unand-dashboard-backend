@@ -1,7 +1,32 @@
 import type { FastifyInstance } from 'fastify';
 import { redis, CACHE_KEYS, getJSON, setJSON } from '../cache/redisClient.js';
-import { getTodayCount, getDailyCountsThisWeek, getMonthlyTotalsLastYear, getYearlyTotalsLast5Years, getCurrentMonthTopVisitors, getCurrentYearTopVisitors } from '../services/visitorService.js';
+import { getTodayCount, getDailyCountsThisWeek, getMonthlyTotalsLastYear, getYearlyTotalsLast5Years, getCurrentMonthTopVisitors, getCurrentYearTopVisitors, getCurrentMonthTopFaculties, getCurrentYearTopFaculties, getDummyGenerationStatus, startDummyGeneration, stopDummyGeneration } from '../services/visitorService.js';
 import { visitorEvents } from '../events/visitorEvents.js';
+
+// Mapping fakultas berdasarkan kode institution
+const FAKULTAS_MAPPING: Record<string, string> = {
+  '01': 'Hukum',
+  '02': 'Pertanian',
+  '03': 'Kedokteran',
+  '04': 'MIPA',
+  '05': 'Ekonomi',
+  '06': 'Peternakan',
+  '07': 'Ilmu Budaya',
+  '08': 'Ilmu Sosial dan Ilmu Politik',
+  '09': 'Teknik',
+  '10': 'Farmasi',
+  '11': 'Teknologi Pertanian',
+  '12': 'Kesehatan Masyarakat',
+  '13': 'Keperawatan',
+  '14': 'Kedokteran Gigi',
+  '15': 'Teknologi Informasi',
+  '16': 'Pascasarjana'
+};
+
+function getFakultasName(institution: string | null): string | null {
+  if (!institution) return null;
+  return FAKULTAS_MAPPING[institution] || null;
+}
 
 function sortMonthlyDesc(months: { month: string; total: number }[]): { month: string; total: number }[] {
   return [...months].sort((a, b) => (a.month < b.month ? 1 : a.month > b.month ? -1 : 0));
@@ -216,6 +241,8 @@ export async function visitorRoutes(fastify: FastifyInstance) {
                 properties: {
                   member_id: { type: ['string', 'null'] },
                   member_name: { type: ['string', 'null'] },
+                  institution: { type: ['string', 'null'] },
+                  fakultas: { type: ['string', 'null'] },
                   total: { type: 'number' }
                 }
               }
@@ -231,7 +258,7 @@ export async function visitorRoutes(fastify: FastifyInstance) {
     if (cachedMeta) {
       const rows = cachedMeta.data;
       if (rows.length > 0 && rows[0].month === currentMonth) {
-        return reply.send({ month: rows[0].month, visitors: rows.map((r: any) => ({ member_id: r.member_id, member_name: r.member_name, total: r.total })), generated_at: cachedMeta.generated_at, ttl_seconds: cachedMeta.ttl_seconds, source: 'cache' });
+        return reply.send({ month: rows[0].month, visitors: rows.map((r: any) => ({ member_id: r.member_id, member_name: r.member_name, institution: r.institution, fakultas: r.fakultas, total: r.total })), generated_at: cachedMeta.generated_at, ttl_seconds: cachedMeta.ttl_seconds, source: 'cache' });
       }
     }
     return reply.status(202).send({ status: 'warming', month: currentMonth, message: 'top month cache not ready', retry_after_seconds: 5 });
@@ -254,6 +281,8 @@ export async function visitorRoutes(fastify: FastifyInstance) {
                 properties: {
                   member_id: { type: ['string', 'null'] },
                   member_name: { type: ['string', 'null'] },
+                  institution: { type: ['string', 'null'] },
+                  fakultas: { type: ['string', 'null'] },
                   total: { type: 'number' }
                 }
               }
@@ -269,10 +298,147 @@ export async function visitorRoutes(fastify: FastifyInstance) {
     if (cachedMeta) {
       const rows = cachedMeta.data;
       if (rows.length > 0 && rows[0].year === currentYear) {
-        return reply.send({ year: rows[0].year, visitors: rows.map((r: any) => ({ member_id: r.member_id, member_name: r.member_name, total: r.total })), generated_at: cachedMeta.generated_at, ttl_seconds: cachedMeta.ttl_seconds, source: 'cache' });
+        return reply.send({ year: rows[0].year, visitors: rows.map((r: any) => ({ member_id: r.member_id, member_name: r.member_name, institution: r.institution, fakultas: r.fakultas, total: r.total })), generated_at: cachedMeta.generated_at, ttl_seconds: cachedMeta.ttl_seconds, source: 'cache' });
       }
     }
     return reply.status(202).send({ status: 'warming', year: currentYear, message: 'top year cache not ready', retry_after_seconds: 5 });
+  });
+
+  // Monthly top faculties (current month top 10)
+  fastify.get('/api/visitors/faculties/monthly/top', {
+    schema: {
+      summary: 'Get top 10 faculties for current month',
+      tags: ['Visitors'],
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            month: { type: 'string' },
+            faculties: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  institution: { type: ['string', 'null'] },
+                  fakultas: { type: ['string', 'null'] },
+                  total: { type: 'number' }
+                }
+              }
+            },
+            source: { type: 'string' }
+          }
+        }
+      }
+    }
+  }, async (_req, reply) => {
+    const currentMonth = new Date().toISOString().slice(0,7);
+    const cachedMeta = await getJSON<any>(CACHE_KEYS.TOP_MONTH_FACULTIES);
+    if (cachedMeta) {
+      const rows = cachedMeta.data;
+      if (rows.length > 0 && rows[0].month === currentMonth) {
+        return reply.send({ month: rows[0].month, faculties: rows.map((r: any) => ({ institution: r.institution, fakultas: r.fakultas, total: r.total })), generated_at: cachedMeta.generated_at, ttl_seconds: cachedMeta.ttl_seconds, source: 'cache' });
+      }
+    }
+    return reply.status(202).send({ status: 'warming', month: currentMonth, message: 'top month faculties cache not ready', retry_after_seconds: 5 });
+  });
+
+  // Yearly top faculties (current year top 10)
+  fastify.get('/api/visitors/faculties/yearly/top', {
+    schema: {
+      summary: 'Get top 10 faculties for current year',
+      tags: ['Visitors'],
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            year: { type: 'number' },
+            faculties: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  institution: { type: ['string', 'null'] },
+                  fakultas: { type: ['string', 'null'] },
+                  total: { type: 'number' }
+                }
+              }
+            },
+            source: { type: 'string' }
+          }
+        }
+      }
+    }
+  }, async (_req, reply) => {
+    const currentYear = new Date().getFullYear();
+    const cachedMeta = await getJSON<any>(CACHE_KEYS.TOP_YEAR_FACULTIES);
+    if (cachedMeta) {
+      const rows = cachedMeta.data;
+      if (rows.length > 0 && rows[0].year === currentYear) {
+        return reply.send({ year: rows[0].year, faculties: rows.map((r: any) => ({ institution: r.institution, fakultas: r.fakultas, total: r.total })), generated_at: cachedMeta.generated_at, ttl_seconds: cachedMeta.ttl_seconds, source: 'cache' });
+      }
+    }
+    return reply.status(202).send({ status: 'warming', year: currentYear, message: 'top year faculties cache not ready', retry_after_seconds: 5 });
+  });
+
+  // Dummy generation endpoints
+  fastify.post('/api/visitors/dummy/start', {
+    schema: {
+      summary: 'Start dummy visitor generation',
+      tags: ['Visitors', 'Dummy'],
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            success: { type: 'boolean' },
+            message: { type: 'string' }
+          }
+        }
+      }
+    }
+  }, async (_req, reply) => {
+    const result = startDummyGeneration();
+    return reply.send(result);
+  });
+
+  fastify.post('/api/visitors/dummy/stop', {
+    schema: {
+      summary: 'Stop dummy visitor generation',
+      tags: ['Visitors', 'Dummy'],
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            success: { type: 'boolean' },
+            message: { type: 'string' }
+          }
+        }
+      }
+    }
+  }, async (_req, reply) => {
+    const result = stopDummyGeneration();
+    return reply.send(result);
+  });
+
+  fastify.get('/api/visitors/dummy/status', {
+    schema: {
+      summary: 'Get dummy visitor generation status',
+      tags: ['Visitors', 'Dummy'],
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            running: { type: 'boolean' },
+            hasInterval: { type: 'boolean' }
+          }
+        }
+      }
+    }
+  }, async (_req, reply) => {
+    const status = getDummyGenerationStatus();
+    return reply.send({
+      running: status.running,
+      hasInterval: status.interval !== null
+    });
   });
 
   // Summary endpoint: bundles today, weekly, monthly into one response
@@ -288,7 +454,7 @@ export async function visitorRoutes(fastify: FastifyInstance) {
             weekly: { type: 'array', items: { type: 'object', properties: { date: { type: 'string' }, total: { type: 'number' } } } },
             monthly: { type: 'array', items: { type: 'object', properties: { month: { type: 'string' }, total: { type: 'number' } } } },
             yearly: { type: 'array', items: { type: 'object', properties: { year: { type: 'number' }, total: { type: 'number' } } } },
-            top_monthly_visitors: { type: 'array', items: { type: 'object', properties: { month: { type: 'string' }, member_id: { type: ['string', 'null'] }, member_name: { type: ['string', 'null'] }, total: { type: 'number' } } } },
+            top_monthly_visitors: { type: 'array', items: { type: 'object', properties: { month: { type: 'string' }, member_id: { type: ['string', 'null'] }, member_name: { type: ['string', 'null'] }, institution: { type: ['string', 'null'] }, fakultas: { type: ['string', 'null'] }, total: { type: 'number' } } } },
             source: { type: 'string' }
           }
         }

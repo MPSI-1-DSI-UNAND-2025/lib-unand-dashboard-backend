@@ -2,11 +2,37 @@ import { pool } from '../db/mysqlClient.js';
 import { redis } from '../cache/redisClient.js';
 import { Op, fn, col } from 'sequelize';
 
+// Mapping fakultas berdasarkan kode institution
+const FAKULTAS_MAPPING: Record<string, string> = {
+  '01': 'Hukum',
+  '02': 'Pertanian',
+  '03': 'Kedokteran',
+  '04': 'MIPA',
+  '05': 'Ekonomi',
+  '06': 'Peternakan',
+  '07': 'Ilmu Budaya',
+  '08': 'Ilmu Sosial dan Ilmu Politik',
+  '09': 'Teknik',
+  '10': 'Farmasi',
+  '11': 'Teknologi Pertanian',
+  '12': 'Kesehatan Masyarakat',
+  '13': 'Keperawatan',
+  '14': 'Kedokteran Gigi',
+  '15': 'Teknologi Informasi',
+  '16': 'Pascasarjana'
+};
+
+function getFakultasName(institution: string | null): string | null {
+  if (!institution) return null;
+  return FAKULTAS_MAPPING[institution] || null;
+}
+
 export interface VisitorRow {
   visitor_id: number;
   member_id: string | null;
   member_name: string | null;
   institution: string | null;
+  fakultas: string | null;
   room_code: string | null;
   checkin_date: string; // ISO string
 }
@@ -276,6 +302,8 @@ export interface MonthlyTopVisitor {
   month: string; // YYYY-MM (current month only in this implementation)
   member_id: string | null;
   member_name: string | null;
+  institution: string | null;
+  fakultas: string | null;
   total: number;
 }
 
@@ -292,10 +320,11 @@ export async function getCurrentMonthTopVisitors(limit = 10): Promise<MonthlyTop
       attributes: [
         'member_id',
         'member_name',
+        'institution',
         [fn('COUNT', col('*')), 'total']
       ],
       where: { checkin_date: { [Op.gte]: mStart, [Op.lt]: mEnd } },
-      group: ['member_id', 'member_name'],
+      group: ['member_id', 'member_name', 'institution'],
       order: [[fn('COUNT', col('*')), 'DESC']],
       limit,
       raw: true
@@ -305,14 +334,16 @@ export async function getCurrentMonthTopVisitors(limit = 10): Promise<MonthlyTop
         month: monthKey,
         member_id: r.member_id,
         member_name: r.member_name,
+        institution: r.institution,
+        fakultas: getFakultasName(r.institution),
         total: Number(r.total)
       });
     }
   } else {
-    const sql = `SELECT member_id, member_name, COUNT(*) AS total
+    const sql = `SELECT member_id, member_name, institution, COUNT(*) AS total
                  FROM visitor_count
                  WHERE checkin_date >= ? AND checkin_date < ?
-                 GROUP BY member_id, member_name
+                 GROUP BY member_id, member_name, institution
                  ORDER BY total DESC
                  LIMIT ${limit}`;
     const [rows] = await pool.query(sql, [mStart, mEnd]);
@@ -321,6 +352,8 @@ export async function getCurrentMonthTopVisitors(limit = 10): Promise<MonthlyTop
         month: monthKey,
         member_id: r.member_id,
         member_name: r.member_name,
+        institution: r.institution,
+        fakultas: getFakultasName(r.institution),
         total: Number(r.total)
       });
     }
@@ -332,6 +365,22 @@ export interface YearlyTopVisitor {
   year: number; // current year only in this implementation
   member_id: string | null;
   member_name: string | null;
+  institution: string | null;
+  fakultas: string | null;
+  total: number;
+}
+
+export interface MonthlyTopFaculty {
+  month: string; // YYYY-MM (current month only in this implementation)
+  institution: string | null;
+  fakultas: string | null;
+  total: number;
+}
+
+export interface YearlyTopFaculty {
+  year: number; // current year only in this implementation
+  institution: string | null;
+  fakultas: string | null;
   total: number;
 }
 
@@ -348,10 +397,11 @@ export async function getCurrentYearTopVisitors(limit = 10): Promise<YearlyTopVi
       attributes: [
         'member_id',
         'member_name',
+        'institution',
         [fn('COUNT', col('*')), 'total']
       ],
       where: { checkin_date: { [Op.gte]: yStart, [Op.lt]: yEnd } },
-      group: ['member_id', 'member_name'],
+      group: ['member_id', 'member_name', 'institution'],
       order: [[fn('COUNT', col('*')), 'DESC']],
       limit,
       raw: true
@@ -361,14 +411,16 @@ export async function getCurrentYearTopVisitors(limit = 10): Promise<YearlyTopVi
         year: y,
         member_id: r.member_id,
         member_name: r.member_name,
+        institution: r.institution,
+        fakultas: getFakultasName(r.institution),
         total: Number(r.total)
       });
     }
   } else {
-    const sql = `SELECT member_id, member_name, COUNT(*) AS total
+    const sql = `SELECT member_id, member_name, institution, COUNT(*) AS total
                  FROM visitor_count
                  WHERE checkin_date >= ? AND checkin_date < ?
-                 GROUP BY member_id, member_name
+                 GROUP BY member_id, member_name, institution
                  ORDER BY total DESC
                  LIMIT ${limit}`;
     const [rows] = await pool.query(sql, [yStart, yEnd]);
@@ -377,9 +429,191 @@ export async function getCurrentYearTopVisitors(limit = 10): Promise<YearlyTopVi
         year: y,
         member_id: r.member_id,
         member_name: r.member_name,
+        institution: r.institution,
+        fakultas: getFakultasName(r.institution),
         total: Number(r.total)
       });
     }
   }
   return results;
+}
+
+// Returns top N faculties (grouped by institution) for the CURRENT month only.
+export async function getCurrentMonthTopFaculties(limit = 10): Promise<MonthlyTopFaculty[]> {
+  const now = new Date();
+  const mStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const mEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const monthKey = `${mStart.getFullYear()}-${String(mStart.getMonth() + 1).padStart(2, '0')}`;
+  const results: MonthlyTopFaculty[] = [];
+  
+  if (USE_SEQUELIZE) {
+    const Visitor = await getVisitorModel();
+    const rows = await Visitor.findAll({
+      attributes: [
+        'institution',
+        [fn('COUNT', col('*')), 'total']
+      ],
+      where: { checkin_date: { [Op.gte]: mStart, [Op.lt]: mEnd } },
+      group: ['institution'],
+      order: [[fn('COUNT', col('*')), 'DESC']],
+      limit,
+      raw: true
+    });
+    for (const r of rows as any[]) {
+      results.push({
+        month: monthKey,
+        institution: r.institution,
+        fakultas: getFakultasName(r.institution),
+        total: Number(r.total)
+      });
+    }
+  } else {
+    const sql = `SELECT institution, COUNT(*) AS total
+                 FROM visitor_count
+                 WHERE checkin_date >= ? AND checkin_date < ?
+                 GROUP BY institution
+                 ORDER BY total DESC
+                 LIMIT ${limit}`;
+    const [rows] = await pool.query(sql, [mStart, mEnd]);
+    for (const r of rows as any[]) {
+      results.push({
+        month: monthKey,
+        institution: r.institution,
+        fakultas: getFakultasName(r.institution),
+        total: Number(r.total)
+      });
+    }
+  }
+  return results;
+}
+
+// Returns top N faculties (grouped by institution) for the CURRENT year only.
+export async function getCurrentYearTopFaculties(limit = 10): Promise<YearlyTopFaculty[]> {
+  const now = new Date();
+  const y = now.getFullYear();
+  const yStart = new Date(y, 0, 1);
+  const yEnd = new Date(y + 1, 0, 1);
+  const results: YearlyTopFaculty[] = [];
+  
+  if (USE_SEQUELIZE) {
+    const Visitor = await getVisitorModel();
+    const rows = await Visitor.findAll({
+      attributes: [
+        'institution',
+        [fn('COUNT', col('*')), 'total']
+      ],
+      where: { checkin_date: { [Op.gte]: yStart, [Op.lt]: yEnd } },
+      group: ['institution'],
+      order: [[fn('COUNT', col('*')), 'DESC']],
+      limit,
+      raw: true
+    });
+    for (const r of rows as any[]) {
+      results.push({
+        year: y,
+        institution: r.institution,
+        fakultas: getFakultasName(r.institution),
+        total: Number(r.total)
+      });
+    }
+  } else {
+    const sql = `SELECT institution, COUNT(*) AS total
+                 FROM visitor_count
+                 WHERE checkin_date >= ? AND checkin_date < ?
+                 GROUP BY institution
+                 ORDER BY total DESC
+                 LIMIT ${limit}`;
+    const [rows] = await pool.query(sql, [yStart, yEnd]);
+    for (const r of rows as any[]) {
+      results.push({
+        year: y,
+        institution: r.institution,
+        fakultas: getFakultasName(r.institution),
+        total: Number(r.total)
+      });
+    }
+  }
+  return results;
+}
+
+// Dummy visitor generation
+let dummyGenerationInterval: NodeJS.Timeout | null = null;
+let isDummyGenerationRunning = false;
+
+export function getDummyGenerationStatus(): { running: boolean; interval: NodeJS.Timeout | null } {
+  return { running: isDummyGenerationRunning, interval: dummyGenerationInterval };
+}
+
+export function startDummyGeneration(): { success: boolean; message: string } {
+  if (isDummyGenerationRunning) {
+    return { success: false, message: 'Dummy generation is already running' };
+  }
+
+  isDummyGenerationRunning = true;
+  dummyGenerationInterval = setInterval(async () => {
+    try {
+      await generateDummyVisitor();
+    } catch (error) {
+      console.error('[dummy-generation] Error generating dummy visitor:', error);
+    }
+  }, 60000); // 1 menit = 60000ms
+
+  console.log('[dummy-generation] Started generating dummy visitors every 1 minute');
+  return { success: true, message: 'Dummy generation started successfully' };
+}
+
+export function stopDummyGeneration(): { success: boolean; message: string } {
+  if (!isDummyGenerationRunning) {
+    return { success: false, message: 'Dummy generation is not running' };
+  }
+
+  if (dummyGenerationInterval) {
+    clearInterval(dummyGenerationInterval);
+    dummyGenerationInterval = null;
+  }
+  isDummyGenerationRunning = false;
+
+  console.log('[dummy-generation] Stopped generating dummy visitors');
+  return { success: true, message: 'Dummy generation stopped successfully' };
+}
+
+async function generateDummyVisitor(): Promise<void> {
+  const institutions = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12', '13', '14', '15', '16'];
+  const memberNames = [
+    'Ahmad Rizki', 'Siti Nurhaliza', 'Budi Santoso', 'Dewi Kartika', 'Eko Prasetyo',
+    'Fina Rahayu', 'Gunawan Sari', 'Hesti Wulandari', 'Indra Kurniawan', 'Jihan Putri',
+    'Kurniawan Adi', 'Lina Marlina', 'Muhammad Ali', 'Nina Sari', 'Oscar Wijaya',
+    'Putri Maharani', 'Qori Sandria', 'Rizki Pratama', 'Sari Dewi', 'Tono Wijaya'
+  ];
+  const roomCodes = ['A101', 'A102', 'B201', 'B202', 'C301', 'C302', 'D401', 'D402'];
+
+  const randomInstitution = institutions[Math.floor(Math.random() * institutions.length)];
+  const randomMemberName = memberNames[Math.floor(Math.random() * memberNames.length)];
+  const randomRoomCode = roomCodes[Math.floor(Math.random() * roomCodes.length)];
+  const randomMemberId = `M${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+
+  const now = new Date();
+  const checkinDate = new Date(now.getTime() - Math.random() * 24 * 60 * 60 * 1000); // Random time within last 24 hours
+
+  if (USE_SEQUELIZE) {
+    const Visitor = await getVisitorModel();
+    await Visitor.create({
+      member_id: randomMemberId,
+      member_name: randomMemberName,
+      institution: randomInstitution,
+      room_code: randomRoomCode,
+      checkin_date: checkinDate
+    });
+  } else {
+    const sql = `INSERT INTO visitor_count (member_id, member_name, institution, room_code, checkin_date) VALUES (?, ?, ?, ?, ?)`;
+    await pool.query(sql, [randomMemberId, randomMemberName, randomInstitution, randomRoomCode, checkinDate]);
+  }
+
+  // Increment today count if it's today
+  const today = new Date();
+  if (checkinDate.toDateString() === today.toDateString()) {
+    await incrementTodayCount(1);
+  }
+
+  console.log(`[dummy-generation] Generated visitor: ${randomMemberName} (${randomInstitution}) at ${checkinDate.toISOString()}`);
 }

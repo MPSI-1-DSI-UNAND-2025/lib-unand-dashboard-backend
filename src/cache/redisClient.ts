@@ -31,6 +31,8 @@ export const CACHE_KEYS = {
   YEARLY_TOTALS: 'visitors:year:totals',
   TOP_MONTH_VISITORS: 'visitors:month:top',
   TOP_YEAR_VISITORS: 'visitors:year:top',
+  TOP_MONTH_FACULTIES: 'visitors:month:faculties:top',
+  TOP_YEAR_FACULTIES: 'visitors:year:faculties:top',
   SUMMARY: 'visitors:summary'
   ,BOOK_COLLECTION_STATS: 'books:stats:collection'
   ,BOOK_TOP_BORROWED: 'books:top:borrowed'
