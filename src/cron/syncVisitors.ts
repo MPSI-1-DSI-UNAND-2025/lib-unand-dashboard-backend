@@ -1,6 +1,6 @@
 import cron from 'node-cron';
 import { CACHE_KEYS, setJSON, redis } from '../cache/redisClient.js';
-import { getTodayCount, getDailyCountsThisWeek, getMonthlyTotalsLastYear, getYearlyTotalsLast5Years, getCurrentMonthTopVisitors, getCurrentYearTopVisitors } from '../services/visitorService.js';
+import { getTodayCount, getDailyCountsThisWeek, getMonthlyTotalsLastYear, getYearlyTotalsLast5Years, getCurrentMonthTopVisitors, getCurrentYearTopVisitors, getCurrentMonthTopFaculties, getCurrentYearTopFaculties } from '../services/visitorService.js';
 import { CRON_SCHEDULES, REALTIME } from './schedules.js';
 import { emitTodayVisitor } from '../events/visitorEvents.js';
 
@@ -87,12 +87,14 @@ export function registerVisitorSyncJob() {
     const start = Date.now();
     console.log('[cron-slow] ---- aggregation start ----');
     try {
-      const [weekDaily, monthly, yearly, topMonthly, topYearly] = await Promise.all([
+      const [weekDaily, monthly, yearly, topMonthly, topYearly, topMonthlyFaculties, topYearlyFaculties] = await Promise.all([
         getDailyCountsThisWeek(),
         getMonthlyTotalsLastYear(),
         getYearlyTotalsLast5Years(),
         getCurrentMonthTopVisitors(10),
-        getCurrentYearTopVisitors(10)
+        getCurrentYearTopVisitors(10),
+        getCurrentMonthTopFaculties(10),
+        getCurrentYearTopFaculties(10)
       ]);
       const metaWrap = (data: any) => ({ generated_at: new Date().toISOString(), ttl_seconds: 90000, data });
       await setJSON(CACHE_KEYS.WEEK_DAILY, metaWrap(weekDaily), 90000);
@@ -100,7 +102,9 @@ export function registerVisitorSyncJob() {
       await setJSON(CACHE_KEYS.YEARLY_TOTALS, metaWrap(yearly), 90000);
       await setJSON(CACHE_KEYS.TOP_MONTH_VISITORS, metaWrap(topMonthly), 90000);
       await setJSON(CACHE_KEYS.TOP_YEAR_VISITORS, metaWrap(topYearly), 90000);
-  console.log(`[cron-slow] updated weekDaily=${weekDaily.length} monthly=${monthly.length} yearly=${yearly.length} topMonthly=${topMonthly.length} topYearly=${topYearly.length} in ${Date.now() - start}ms`);
+      await setJSON(CACHE_KEYS.TOP_MONTH_FACULTIES, metaWrap(topMonthlyFaculties), 90000);
+      await setJSON(CACHE_KEYS.TOP_YEAR_FACULTIES, metaWrap(topYearlyFaculties), 90000);
+  console.log(`[cron-slow] updated weekDaily=${weekDaily.length} monthly=${monthly.length} yearly=${yearly.length} topMonthly=${topMonthly.length} topYearly=${topYearly.length} topMonthlyFaculties=${topMonthlyFaculties.length} topYearlyFaculties=${topYearlyFaculties.length} in ${Date.now() - start}ms`);
     } catch (e) {
       console.error('[cron-slow] error', e);
     } finally {
@@ -112,12 +116,14 @@ export function registerVisitorSyncJob() {
 export async function prewarmVisitorCaches() {
   try {
     const start = Date.now();
-    const [weekDaily, monthly, yearly, topMonthly, topYearly] = await Promise.all([
+    const [weekDaily, monthly, yearly, topMonthly, topYearly, topMonthlyFaculties, topYearlyFaculties] = await Promise.all([
       getDailyCountsThisWeek(),
       getMonthlyTotalsLastYear(),
       getYearlyTotalsLast5Years(),
       getCurrentMonthTopVisitors(10),
-      getCurrentYearTopVisitors(10)
+      getCurrentYearTopVisitors(10),
+      getCurrentMonthTopFaculties(10),
+      getCurrentYearTopFaculties(10)
     ]);
     const metaWrap = (data: any) => ({ generated_at: new Date().toISOString(), ttl_seconds: 90000, data });
     await setJSON(CACHE_KEYS.WEEK_DAILY, metaWrap(weekDaily), 90000);
@@ -125,6 +131,8 @@ export async function prewarmVisitorCaches() {
     await setJSON(CACHE_KEYS.YEARLY_TOTALS, metaWrap(yearly), 90000);
     await setJSON(CACHE_KEYS.TOP_MONTH_VISITORS, metaWrap(topMonthly), 90000);
     await setJSON(CACHE_KEYS.TOP_YEAR_VISITORS, metaWrap(topYearly), 90000);
+    await setJSON(CACHE_KEYS.TOP_MONTH_FACULTIES, metaWrap(topMonthlyFaculties), 90000);
+    await setJSON(CACHE_KEYS.TOP_YEAR_FACULTIES, metaWrap(topYearlyFaculties), 90000);
     console.log(`[prewarm-visitors] done in ${Date.now() - start}ms`);
   } catch (e) {
     console.error('[prewarm-visitors] error', e);
