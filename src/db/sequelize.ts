@@ -4,11 +4,11 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // Prefer MYSQL_* variables (consistent with mysqlClient.ts and .env); fall back to legacy DB_* if provided.
-const MYSQL_HOST = process.env.MYSQL_HOST || process.env.DB_HOST || 'localhost';
+const MYSQL_HOST = process.env.MYSQL_HOST || process.env.DB_HOST || '10.44.7.43';
 const MYSQL_PORT = process.env.MYSQL_PORT || process.env.DB_PORT || '3306';
-const MYSQL_USER = process.env.MYSQL_USER || process.env.DB_USER || 'root';
-const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || process.env.DB_PASSWORD || '';
-const MYSQL_DATABASE = process.env.MYSQL_DATABASE || process.env.DB_NAME || 'library';
+const MYSQL_USER = process.env.MYSQL_USER || process.env.DB_USER || 'mpsi';
+const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || process.env.DB_PASSWORD || 'mpsi';
+const MYSQL_DATABASE = process.env.MYSQL_DATABASE || process.env.DB_NAME || 'slims';
 
 export const sequelize = new Sequelize(MYSQL_DATABASE, MYSQL_USER, MYSQL_PASSWORD, {
   host: MYSQL_HOST,

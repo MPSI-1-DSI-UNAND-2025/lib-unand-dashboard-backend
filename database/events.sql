@@ -1,0 +1,11 @@
+-- Events table (simple)
+CREATE TABLE IF NOT EXISTS events (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  title VARCHAR(200) NOT NULL,
+  location VARCHAR(255) NOT NULL,
+  starts_at DATETIME NOT NULL,
+  thumbnail_path VARCHAR(255) NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_starts_at (starts_at)
+);
